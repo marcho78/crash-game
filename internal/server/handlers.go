@@ -1,38 +1,25 @@
 package server
 
 import (
-	"math"
-	"net/http"
-	"strconv"
-	"time"
-
 	"crash-game/internal/game"
 	"crash-game/internal/models"
 
 	"log"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 func (s *GameServer) GetGameHistory(c *gin.Context) {
-	limit := 20 // Default limit
-	if limitStr := c.Query("limit"); limitStr != "" {
-		if parsedLimit, err := strconv.Atoi(limitStr); err == nil {
-			limit = parsedLimit
-		}
+	userID := c.GetString("userId")
+
+	history, err := s.db.GetGameHistory(userID)
+	if err != nil {
+		c.JSON(500, gin.H{"error": "failed to get game history"})
+		return
 	}
 
-	s.historyMu.RLock()
-	historyLen := len(s.gameHistory)
-	if limit > historyLen {
-		limit = historyLen
-	}
-	history := s.gameHistory[:limit]
-	s.historyMu.RUnlock()
-
-	c.JSON(http.StatusOK, gin.H{
-		"history": history,
-	})
+	c.JSON(200, gin.H{"history": history})
 }
 
 func (s *GameServer) GetProfile(c *gin.Context) {
@@ -77,6 +64,7 @@ func (s *GameServer) PlaceBet(c *gin.Context) {
 	}
 
 	userID := c.GetString("userId")
+	log.Printf("Placing bet for user %s, amount: %f", userID, req.Amount)
 
 	// Check user balance
 	balance, err := s.db.GetUserBalance(userID)
@@ -92,6 +80,9 @@ func (s *GameServer) PlaceBet(c *gin.Context) {
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// Add debug logging for game state
+	log.Printf("Current game status: %v", s.currentGame.Status)
 
 	// Validate game state
 	if s.currentGame == nil || s.currentGame.Status != "betting" {
@@ -127,19 +118,54 @@ func (s *GameServer) PlaceBet(c *gin.Context) {
 
 func (s *GameServer) RequestWithdrawal(c *gin.Context) {
 	userID := c.GetString("userId")
-	var req models.WithdrawalRequest
+	log.Printf("Starting withdrawal request for user: %s", userID)
+
+	var req struct {
+		Amount float64 `json:"amount" binding:"required,gt=0"`
+	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Printf("Invalid request: %v", err)
 		c.JSON(400, gin.H{"error": "invalid request"})
 		return
 	}
+	log.Printf("Withdrawal amount requested: %f", req.Amount)
 
-	if err := s.db.CreateWithdrawal(userID, &req); err != nil {
+	// Check balance first
+	balance, err := s.db.GetUserBalance(userID)
+	if err != nil {
+		log.Printf("Failed to get balance: %v", err)
+		c.JSON(500, gin.H{"error": "failed to get balance"})
+		return
+	}
+	log.Printf("Current balance: %f", balance)
+
+	if balance < req.Amount {
+		log.Printf("Insufficient balance: %f < %f", balance, req.Amount)
+		c.JSON(400, gin.H{"error": "insufficient balance"})
+		return
+	}
+
+	withdrawalID := uuid.New().String()
+	log.Printf("Generated withdrawal ID: %s", withdrawalID)
+
+	if err := s.db.CreateWithdrawal(userID, &models.Withdrawal{
+		ID:     withdrawalID,
+		UserID: userID,
+		Amount: req.Amount,
+		Status: "pending",
+	}); err != nil {
+		log.Printf("Failed to create withdrawal: %v", err)
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
 
-	c.JSON(200, gin.H{"message": "withdrawal request created"})
+	log.Printf("Withdrawal request successful")
+	c.JSON(200, gin.H{
+		"id":     withdrawalID,
+		"status": "pending",
+		"amount": req.Amount,
+	})
 }
 
 func (s *GameServer) RequestDeposit(c *gin.Context) {
@@ -196,47 +222,24 @@ func (s *GameServer) UpdateSettings(c *gin.Context) {
 func (s *GameServer) Cashout(c *gin.Context) {
 	userID := c.GetString("userId")
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	game := s.currentGame
+	s.mu.RUnlock()
 
-	log.Printf("Cashout attempt - Game State: %+v", s.currentGame)
-
-	if s.currentGame == nil || s.currentGame.Status != "in_progress" {
-		log.Printf("Game not in progress - Status: %v", s.currentGame.Status)
+	if game == nil || game.Status != "in_progress" {
 		c.JSON(400, gin.H{"error": "no active game"})
 		return
 	}
 
-	player, exists := s.currentGame.Players[userID]
-	log.Printf("Player exists: %v, Player state: %+v", exists, player)
-
-	if !exists || player.CashedOut {
-		c.JSON(400, gin.H{"error": "no active bet or already cashed out"})
+	multiplier := game.GetCurrentMultiplier()
+	if err := game.PlayerCashout(userID, multiplier); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
-
-	elapsed := time.Since(s.currentGame.StartTime).Seconds()
-	multiplier := math.Pow(math.E, 0.1*elapsed)
-	winAmount := player.BetAmount * multiplier
-
-	now := time.Now()
-	player.CashedOut = true
-	player.CashoutAt = &now
-	player.WinAmount = winAmount
-
-	err := s.db.UpdateBalance(userID, winAmount, "credit")
-	if err != nil {
-		log.Printf("Error updating balance: %v", err)
-		c.JSON(500, gin.H{"error": err.Error()})
-		return
-	}
-
-	log.Printf("Cashout successful - Win Amount: %f", winAmount)
 
 	c.JSON(200, gin.H{
 		"success":    true,
 		"multiplier": multiplier,
-		"winAmount":  winAmount,
 	})
 }
 
@@ -244,7 +247,16 @@ func (s *GameServer) GetCurrentGame(c *gin.Context) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	c.JSON(200, s.currentGame)
+	if s.currentGame == nil {
+		c.JSON(404, gin.H{"error": "no active game"})
+		return
+	}
+
+	c.JSON(200, gin.H{
+		"gameId": s.currentGame.GameID,
+		"status": s.currentGame.Status,
+		"hash":   s.currentGame.Hash,
+	})
 }
 
 func (s *GameServer) GetBalance(c *gin.Context) {
@@ -263,19 +275,51 @@ func (s *GameServer) GetBalance(c *gin.Context) {
 
 func (s *GameServer) VerifyGameFairness(c *gin.Context) {
 	var req struct {
-		GameID string `json:"gameId"`
-		Hash   string `json:"hash"`
+		GameID string `json:"gameId" binding:"required"`
+		Hash   string `json:"hash" binding:"required"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(400, gin.H{"error": "invalid input"})
+		log.Printf("❌ VERIFY: Invalid JSON: %v", err)
+		c.JSON(400, gin.H{"error": "invalid request"})
 		return
 	}
 
-	result := game.VerifyGameHash(req.GameID, req.Hash)
+	// Check current game first
+	s.mu.RLock()
+	if s.currentGame != nil && s.currentGame.GameID == req.GameID {
+		if s.currentGame.Hash == req.Hash {
+			seed := s.currentGame.Hash[:8]
+			crashPoint := game.CalculateCrashPoint(seed)
+			s.mu.RUnlock()
+			c.JSON(200, gin.H{
+				"valid":      true,
+				"crashPoint": crashPoint,
+				"seed":       seed,
+			})
+			return
+		}
+	}
+	s.mu.RUnlock()
+
+	// If not current game, check database
+	gameData, err := s.db.GetGameByID(req.GameID)
+	if err != nil {
+		log.Printf("❌ VERIFY: DB lookup failed: %v", err)
+		c.JSON(404, gin.H{"error": "game not found"})
+		return
+	}
+
+	if gameData.Hash != req.Hash {
+		c.JSON(400, gin.H{"error": "invalid hash"})
+		return
+	}
+
+	seed := gameData.Hash[:8]
+	crashPoint := game.CalculateCrashPoint(seed)
 	c.JSON(200, gin.H{
-		"valid":              result.Valid,
-		"expectedCrashPoint": result.ExpectedCrashPoint,
-		"seed":               result.Seed,
+		"valid":      true,
+		"crashPoint": crashPoint,
+		"seed":       seed,
 	})
 }

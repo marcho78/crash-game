@@ -4,6 +4,7 @@ import (
 	"crash-game/internal/models"
 	"database/sql"
 	"errors"
+	"log"
 
 	_ "github.com/lib/pq"
 )
@@ -26,89 +27,46 @@ func NewDatabase(connStr string) (*Database, error) {
 }
 
 func (d *Database) SaveGame(game *models.GameHistory) error {
-	tx, err := d.db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
+	log.Printf("DB: Saving game - ID: %s, Hash: %s", game.GameID, game.Hash)
 
-	// Insert game
-	_, err = tx.Exec(`
+	result, err := d.db.Exec(`
 		INSERT INTO games (game_id, crash_point, start_time, end_time, hash)
-		VALUES ($1, $2, $3, $4, $5)
+		VALUES ($1::uuid, $2, $3, $4, $5)
 	`, game.GameID, game.CrashPoint, game.StartTime, game.EndTime, game.Hash)
+
 	if err != nil {
+		log.Printf("DB: Failed to save game: %v", err)
 		return err
 	}
 
-	// Insert bets
-	for userId, player := range game.Players {
-		_, err = tx.Exec(`
-			INSERT INTO bets (game_id, user_id, amount, cashed_out, cashout_multiplier, win_amount)
-			VALUES ($1, $2, $3, $4, $5, $6)
-		`, game.GameID, userId, player.BetAmount, player.CashedOut, player.CashoutAt, player.WinAmount)
-		if err != nil {
-			return err
-		}
-	}
-
-	return tx.Commit()
+	rows, _ := result.RowsAffected()
+	log.Printf("DB: Game saved successfully, rows affected: %d", rows)
+	return nil
 }
 
-func (d *Database) GetGameHistory(limit int) ([]models.GameHistory, error) {
+func (d *Database) GetGameHistory(userID string) ([]models.GameHistory, error) {
 	rows, err := d.db.Query(`
-		SELECT g.game_id::text, g.crash_point, g.start_time, g.end_time, g.hash,
-			   b.user_id, b.amount, b.cashed_out, b.cashout_multiplier, b.win_amount
-		FROM games g
-		LEFT JOIN bets b ON g.game_id = b.game_id
-		ORDER BY g.game_id DESC
-		LIMIT $1
-	`, limit)
+			SELECT g.game_id, g.crash_point, g.start_time, g.end_time, g.hash
+			FROM games g
+			LEFT JOIN bets b ON g.game_id = b.game_id AND b.user_id = $1::uuid
+			ORDER BY g.start_time DESC
+			LIMIT 50
+		`, userID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
-	games := make(map[string]*models.GameHistory)
+	var history []models.GameHistory
 	for rows.Next() {
-		var gameId string
-		var game models.GameHistory
-		var userId string
-		var bet models.Player
-
-		err := rows.Scan(
-			&gameId, &game.CrashPoint, &game.StartTime, &game.EndTime, &game.Hash,
-			&userId, &bet.BetAmount, &bet.CashedOut, &bet.CashoutAt, &bet.WinAmount,
-		)
+		var h models.GameHistory
+		err := rows.Scan(&h.GameID, &h.CrashPoint, &h.StartTime, &h.EndTime, &h.Hash)
 		if err != nil {
 			return nil, err
 		}
-
-		if _, exists := games[gameId]; !exists {
-			game.GameID = gameId
-			game.Players = []models.PlayerHistory{}
-			games[gameId] = &game
-		}
-
-		if userId != "" {
-			playerHistory := models.PlayerHistory{
-				UserID:    userId,
-				BetAmount: bet.BetAmount,
-				CashedOut: bet.CashedOut,
-				CashoutAt: bet.CashoutAt,
-				WinAmount: bet.WinAmount,
-			}
-			games[gameId].Players = append(games[gameId].Players, playerHistory)
-		}
+		history = append(history, h)
 	}
-
-	// Convert map to slice
-	result := make([]models.GameHistory, 0, len(games))
-	for _, game := range games {
-		result = append(result, *game)
-	}
-
-	return result, nil
+	return history, nil
 }
 
 func (d *Database) SaveNotification(notif *models.AdminNotification) error {
@@ -245,4 +203,28 @@ func (d *Database) SaveGameHistory(history models.GameHistory) error {
 	}
 
 	return tx.Commit()
+}
+
+func (d *Database) GetGameByID(gameID string) (*models.GameHistory, error) {
+	log.Printf("DB: Looking up game %s", gameID)
+	var game models.GameHistory
+
+	err := d.db.QueryRow(`
+		SELECT game_id, crash_point, start_time, end_time, hash
+		FROM games 
+		WHERE game_id = $1::uuid
+	`, gameID).Scan(&game.GameID, &game.CrashPoint, &game.StartTime, &game.EndTime, &game.Hash)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			log.Printf("DB: No game found with ID %s", gameID)
+		} else {
+			log.Printf("DB: Error querying game: %v", err)
+		}
+		return nil, err
+	}
+
+	log.Printf("DB: Found game - ID: %s, Hash: %s, CrashPoint: %f",
+		game.GameID, game.Hash, game.CrashPoint)
+	return &game, nil
 }

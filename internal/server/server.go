@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"crash-game/internal/database"
+	"crash-game/internal/game"
 	"crash-game/internal/models"
 	"crash-game/internal/notification"
 	"crash-game/internal/security"
@@ -90,52 +91,51 @@ func NewGameServer(db *database.Database) *GameServer {
 
 func (s *GameServer) gameLoop() {
 	for {
-		// Start new game
-		s.mu.Lock()
 		s.startNewGame()
-		s.currentGame.Status = "betting"
-		log.Printf("Game %s started - Betting phase", s.currentGame.GameID)
-		s.mu.Unlock()
 
-		// Betting phase (5 seconds)
-		time.Sleep(5 * time.Second)
+		// Betting phase
+		log.Printf("⏳ Betting phase started")
+		time.Sleep(30 * time.Second)
 
-		// Start game phase
+		// Game phase
 		s.mu.Lock()
 		s.currentGame.Status = "in_progress"
-		s.currentGame.StartTime = time.Now()
-		log.Printf("Game %s in progress - Crash point: %.2f", s.currentGame.GameID, s.currentGame.CrashPoint)
+		log.Printf("🎲 Game in progress - ID: %s", s.currentGame.GameID)
 		s.mu.Unlock()
 
-		// Wait until crash point
-		crashTime := time.Duration(float64(time.Second) * s.currentGame.CrashPoint)
-
+		// Wait until crash
+		crashTime := time.Duration(math.Log(s.currentGame.CrashPoint) * 8 * float64(time.Second))
 		time.Sleep(crashTime)
 
-		// End game
+		// End game and save
 		s.mu.Lock()
 		s.currentGame.Status = "crashed"
-		log.Printf("Game %s crashed at %.2fx", s.currentGame.GameID, s.currentGame.CrashPoint)
+		log.Printf("💥 Game crashed - ID: %s at %.2fx", s.currentGame.GameID, s.currentGame.CrashPoint)
 		s.saveGameToHistory()
 		s.mu.Unlock()
 
-		// Short delay before next game
 		time.Sleep(2 * time.Second)
 	}
 }
 
 func (s *GameServer) startNewGame() {
 	gameID := uuid.New().String()
-	crashPoint := 2.0 // For testing, you can make this random later
+	hash := generateHash(gameID)
+	crashPoint := game.CalculateCrashPoint(hash[:8])
 
+	s.mu.Lock()
 	s.currentGame = &GameState{
 		GameID:     gameID,
 		StartTime:  time.Now(),
 		CrashPoint: crashPoint,
 		Status:     "betting",
 		Players:    make(map[string]*Player),
-		Hash:       fmt.Sprintf("%x", sha256.Sum256([]byte(gameID))),
+		Hash:       hash,
 	}
+	s.mu.Unlock()
+
+	log.Printf("🎮 NEW GAME - ID: %s", gameID)
+	log.Printf("🎲 Game details - Hash: %s, CrashPoint: %.2f", hash, crashPoint)
 }
 
 func (s *GameServer) runGameProgress() {
@@ -170,10 +170,10 @@ func (s *GameServer) runGameProgress() {
 	}
 }
 
-func generateHash() string {
-	data := make([]byte, 32)
-	rand.Read(data)
-	return fmt.Sprintf("%x", sha256.Sum256(data))
+func generateHash(gameID string) string {
+	data := []byte(gameID)
+	hash := sha256.Sum256(data)
+	return fmt.Sprintf("%x", hash)
 }
 
 func generateCrashPoint() float64 {
@@ -186,6 +186,13 @@ func init() {
 }
 
 func (s *GameServer) saveGameToHistory() {
+	if s.currentGame == nil {
+		log.Printf("❌ SAVE: No current game to save")
+		return
+	}
+
+	log.Printf("💾 SAVE: Game %s - Hash: %s", s.currentGame.GameID, s.currentGame.Hash)
+
 	gameHistory := models.GameHistory{
 		GameID:     s.currentGame.GameID,
 		CrashPoint: s.currentGame.CrashPoint,
@@ -195,21 +202,11 @@ func (s *GameServer) saveGameToHistory() {
 		Players:    make([]models.PlayerHistory, 0),
 	}
 
-	for userID, player := range s.currentGame.Players {
-		playerHistory := models.PlayerHistory{
-			UserID:     userID,
-			BetAmount:  player.BetAmount,
-			CashedOut:  player.CashedOut,
-			CashoutAt:  player.CashoutAt,
-			WinAmount:  player.WinAmount,
-			Multiplier: player.WinAmount / player.BetAmount,
-		}
-		gameHistory.Players = append(gameHistory.Players, playerHistory)
+	if err := s.db.SaveGame(&gameHistory); err != nil {
+		log.Printf("❌ SAVE: Failed to save game: %v", err)
+		return
 	}
-
-	s.historyMu.Lock()
-	s.gameHistory = append(s.gameHistory, gameHistory)
-	s.historyMu.Unlock()
+	log.Printf("✅ SAVE: Game saved successfully")
 }
 
 func (s *GameServer) Run(addr string) error {
@@ -219,16 +216,14 @@ func (s *GameServer) Run(addr string) error {
 	// Start the game loop in a goroutine
 	go s.gameLoop()
 
+	// Start the progress tracker in a goroutine
+	go s.runGameProgress()
+
 	// Log server startup
 	log.Printf("Server starting on %s", addr)
 
-	// Start the HTTP server and block until it returns
-	if err := s.router.Run(addr); err != nil {
-		log.Printf("Server failed to start: %v", err)
-		return err
-	}
-
-	return nil
+	// Start the HTTP server
+	return s.router.Run(addr)
 }
 
 func (s *GameServer) setupRoutes() {
@@ -248,13 +243,16 @@ func (s *GameServer) setupRoutes() {
 		}
 
 		// Protected routes
-		protected := api.Group("")
-		protected.Use(AuthMiddleware())
+		authenticated := api.Group("")
+		authenticated.Use(AuthMiddleware())
 		{
-			protected.GET("/user/balance", s.GetBalance)
-			protected.POST("/bet", s.PlaceBet)
-			protected.POST("/cashout", s.Cashout)
-			protected.GET("/game/current", s.GetCurrentGame)
+			authenticated.GET("/user/balance", s.GetBalance)
+			authenticated.POST("/bet", s.PlaceBet)
+			authenticated.POST("/cashout", s.Cashout)
+			authenticated.GET("/game/current", s.GetCurrentGame)
+			authenticated.GET("/game/history", s.GetGameHistory)
+			authenticated.POST("/game/verify", s.VerifyGameFairness)
+			authenticated.POST("/user/withdraw", s.RequestWithdrawal)
 		}
 	}
 }
