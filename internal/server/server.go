@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"crash-game/internal/database"
-	"crash-game/internal/game"
 	"crash-game/internal/models"
 	"crash-game/internal/notification"
 	"crash-game/internal/security"
@@ -29,6 +28,7 @@ type GameState struct {
 	Players    map[string]*Player `json:"players"`
 	Elapsed    float64            `json:"elapsed"`
 	Hash       string             `json:"hash"`
+	Saved      bool               `json:"-"`
 }
 
 type Player struct {
@@ -121,12 +121,12 @@ func (s *GameServer) gameLoop() {
 func (s *GameServer) startNewGame() {
 	gameID := uuid.New().String()
 	hash := generateHash(gameID)
-	crashPoint := game.CalculateCrashPoint(hash[:8])
+	crashPoint := generateCrashPoint()
 
 	s.mu.Lock()
 	s.currentGame = &GameState{
 		GameID:     gameID,
-		StartTime:  time.Now(),
+		StartTime:  time.Now().Add(5 * time.Second),
 		CrashPoint: crashPoint,
 		Status:     "betting",
 		Players:    make(map[string]*Player),
@@ -136,11 +136,26 @@ func (s *GameServer) startNewGame() {
 
 	log.Printf("🎮 NEW GAME - ID: %s", gameID)
 	log.Printf("🎲 Game details - Hash: %s, CrashPoint: %.2f", hash, crashPoint)
+
+	// Start game progress after betting phase
+	time.AfterFunc(5*time.Second, func() {
+		go s.runGameProgress()
+	})
 }
 
 func (s *GameServer) runGameProgress() {
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
+
+	s.mu.Lock()
+	if s.currentGame == nil {
+		s.mu.Unlock()
+		return
+	}
+	s.currentGame.Status = "in_progress"
+	s.mu.Unlock()
+
+	log.Printf("🎮 Game %s is now in progress", s.currentGame.GameID)
 
 	for {
 		<-ticker.C
@@ -187,13 +202,21 @@ func init() {
 
 func (s *GameServer) saveGameToHistory() {
 	if s.currentGame == nil {
-		log.Printf("❌ SAVE: No current game to save")
+		return
+	}
+
+	// Add a saved flag check
+	if s.currentGame.Saved {
+		log.Printf("Game %s already saved, skipping", s.currentGame.GameID)
 		return
 	}
 
 	log.Printf("💾 SAVE: Game %s - Hash: %s", s.currentGame.GameID, s.currentGame.Hash)
 
-	gameHistory := models.GameHistory{
+	// Mark as saved before doing the actual save
+	s.currentGame.Saved = true
+
+	history := &models.GameHistory{
 		GameID:     s.currentGame.GameID,
 		CrashPoint: s.currentGame.CrashPoint,
 		StartTime:  s.currentGame.StartTime,
@@ -202,10 +225,11 @@ func (s *GameServer) saveGameToHistory() {
 		Players:    make([]models.PlayerHistory, 0),
 	}
 
-	if err := s.db.SaveGame(&gameHistory); err != nil {
+	if err := s.db.SaveGameHistory(history); err != nil {
 		log.Printf("❌ SAVE: Failed to save game: %v", err)
 		return
 	}
+
 	log.Printf("✅ SAVE: Game saved successfully")
 }
 

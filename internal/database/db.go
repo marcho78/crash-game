@@ -176,26 +176,27 @@ func (d *Database) MarkNotificationRead(notificationID string, adminID string) e
 	return nil
 }
 
-func (d *Database) SaveGameHistory(history models.GameHistory) error {
+func (d *Database) SaveGameHistory(history *models.GameHistory) error {
 	tx, err := d.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	// Parse string UUID to UUID type
+	// Insert game record
 	_, err = tx.Exec(`
 		INSERT INTO games (game_id, crash_point, start_time, end_time, hash)
-		VALUES ($1::uuid, $2, $3, $4, $5)
+		VALUES ($1, $2, $3, $4, $5)
 	`, history.GameID, history.CrashPoint, history.StartTime, history.EndTime, history.Hash)
 	if err != nil {
 		return err
 	}
 
+	// Insert player records
 	for _, player := range history.Players {
 		_, err = tx.Exec(`
-			INSERT INTO bets (game_id, user_id, amount, cashed_out, cashout_multiplier, win_amount)
-			VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6)
+			INSERT INTO bets (game_id, user_id, amount, cashed_out, cashout_at, win_amount)
+			VALUES ($1, $2, $3, $4, $5, $6)
 		`, history.GameID, player.UserID, player.BetAmount, player.CashedOut, player.CashoutAt, player.WinAmount)
 		if err != nil {
 			return err

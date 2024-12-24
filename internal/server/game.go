@@ -25,5 +25,6 @@ func (g *GameState) GetCurrentMultiplier() float64 {
 		return 0
 	}
 	elapsed := time.Since(g.StartTime).Seconds()
-	return math.Floor(math.Pow(math.E, elapsed/8)*100) / 100
+	multiplier := math.Pow(math.E, 0.1*elapsed)
+	return math.Floor(multiplier*100) / 100
 }

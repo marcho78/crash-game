@@ -5,6 +5,8 @@ import (
 	"crash-game/internal/models"
 
 	"log"
+	"strings"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -59,32 +61,41 @@ func (s *GameServer) PlaceBet(c *gin.Context) {
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(400, gin.H{"error": "invalid request: " + err.Error()})
+		if strings.Contains(err.Error(), "failed on the 'gt' tag") {
+			c.JSON(400, gin.H{"error": "invalid amount: must be greater than 0"})
+			return
+		}
+		c.JSON(400, gin.H{"error": "invalid request"})
 		return
 	}
 
 	userID := c.GetString("userId")
 	log.Printf("Placing bet for user %s, amount: %f", userID, req.Amount)
 
-	// Check user balance
+	// Check balance first
 	balance, err := s.db.GetUserBalance(userID)
 	if err != nil {
 		c.JSON(500, gin.H{"error": "failed to get balance"})
 		return
 	}
 
+	// Check insufficient balance before max bet
 	if balance < req.Amount {
 		c.JSON(400, gin.H{"error": "insufficient balance"})
+		return
+	}
+
+	// Then check maximum bet
+	const maxBetAmount = 1000.0
+	if req.Amount > maxBetAmount {
+		c.JSON(400, gin.H{"error": "bet amount exceeds maximum allowed"})
 		return
 	}
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Add debug logging for game state
-	log.Printf("Current game status: %v", s.currentGame.Status)
-
-	// Validate game state
+	// Validate game state BEFORE deducting balance
 	if s.currentGame == nil || s.currentGame.Status != "betting" {
 		c.JSON(400, gin.H{"error": "game not accepting bets"})
 		return
@@ -96,10 +107,10 @@ func (s *GameServer) PlaceBet(c *gin.Context) {
 		return
 	}
 
-	// Update balance first
+	// Deduct bet amount ONLY after all validations pass
 	if err := s.db.UpdateBalance(userID, req.Amount, "debit"); err != nil {
-		log.Printf("Failed to update balance: %v", err)
-		c.JSON(500, gin.H{"error": "failed to update balance: " + err.Error()})
+		log.Printf("❌ BET: Failed to update balance: %v", err)
+		c.JSON(500, gin.H{"error": "failed to update balance"})
 		return
 	}
 
@@ -107,6 +118,7 @@ func (s *GameServer) PlaceBet(c *gin.Context) {
 	s.currentGame.Players[userID] = &Player{
 		BetAmount:   req.Amount,
 		CashedOut:   false,
+		WinAmount:   0,
 		AutoCashout: req.AutoCashout,
 	}
 
@@ -146,15 +158,25 @@ func (s *GameServer) RequestWithdrawal(c *gin.Context) {
 		return
 	}
 
+	// Deduct from balance
+	if err := s.db.UpdateBalance(userID, req.Amount, "debit"); err != nil {
+		log.Printf("Failed to update balance: %v", err)
+		c.JSON(500, gin.H{"error": "failed to update balance"})
+		return
+	}
+
 	withdrawalID := uuid.New().String()
 	log.Printf("Generated withdrawal ID: %s", withdrawalID)
 
+	// Create withdrawal record
 	if err := s.db.CreateWithdrawal(userID, &models.Withdrawal{
 		ID:     withdrawalID,
 		UserID: userID,
 		Amount: req.Amount,
 		Status: "pending",
 	}); err != nil {
+		// Rollback balance if withdrawal creation fails
+		s.db.UpdateBalance(userID, req.Amount, "credit")
 		log.Printf("Failed to create withdrawal: %v", err)
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
@@ -222,24 +244,52 @@ func (s *GameServer) UpdateSettings(c *gin.Context) {
 func (s *GameServer) Cashout(c *gin.Context) {
 	userID := c.GetString("userId")
 
-	s.mu.RLock()
-	game := s.currentGame
-	s.mu.RUnlock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	if game == nil || game.Status != "in_progress" {
+	if s.currentGame == nil || s.currentGame.Status != "in_progress" {
 		c.JSON(400, gin.H{"error": "no active game"})
 		return
 	}
 
-	multiplier := game.GetCurrentMultiplier()
-	if err := game.PlayerCashout(userID, multiplier); err != nil {
-		c.JSON(400, gin.H{"error": err.Error()})
+	player, exists := s.currentGame.Players[userID]
+	if !exists {
+		c.JSON(400, gin.H{"error": "no bet found for this game"})
 		return
 	}
+
+	if player.CashedOut {
+		c.JSON(400, gin.H{"error": "already cashed out"})
+		return
+	}
+
+	multiplier := s.currentGame.GetCurrentMultiplier()
+	winAmount := player.BetAmount * multiplier
+
+	// Update player state
+	player.CashedOut = true
+	player.WinAmount = winAmount
+	now := time.Now()
+	player.CashoutAt = &now
+
+	// Add debug logging
+	initialBalance, _ := s.db.GetUserBalance(userID)
+	log.Printf("DEBUG: Balance before cashout: %f", initialBalance)
+
+	// Update user balance with winnings
+	if err := s.db.UpdateBalance(userID, winAmount, "credit"); err != nil {
+		c.JSON(500, gin.H{"error": "failed to update balance"})
+		return
+	}
+
+	// Verify credit
+	finalBalance, _ := s.db.GetUserBalance(userID)
+	log.Printf("DEBUG: Balance after cashout: %f (win amount: %f)", finalBalance, winAmount)
 
 	c.JSON(200, gin.H{
 		"success":    true,
 		"multiplier": multiplier,
+		"winAmount":  winAmount,
 	})
 }
 
