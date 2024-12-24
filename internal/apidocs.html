@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Crash Game API Documentation</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 20px;
+        }
+        .method {
+            display: inline-block;
+            padding: 4px 8px;
+            border-radius: 4px;
+            color: white;
+            font-weight: bold;
+            min-width: 60px;
+            text-align: center;
+            margin-right: 10px;
+        }
+        .get { background-color: #61affe; }
+        .post { background-color: #49cc90; }
+        .put { background-color: #fca130; }
+        .delete { background-color: #f93e3e; }
+        
+        .endpoint {
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            margin: 20px 0;
+            background: #fff;
+        }
+        .endpoint-header {
+            padding: 10px;
+            background: #f8f9fa;
+            border-bottom: 1px solid #ddd;
+            cursor: pointer;
+        }
+        .endpoint-content {
+            padding: 15px;
+        }
+        .response {
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+        .code {
+            font-family: monospace;
+            background: #272822;
+            color: #f8f8f2;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+        .tag {
+            background: #e8f4fd;
+            color: #0d47a1;
+            padding: 2px 6px;
+            border-radius: 4px;
+            font-size: 0.9em;
+        }
+        .section {
+            margin: 40px 0;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 10px 0;
+        }
+        th, td {
+            padding: 8px;
+            border: 1px solid #ddd;
+            text-align: left;
+        }
+        th {
+            background: #f8f9fa;
+        }
+    </style>
+</head>
+<body>
+    <h1>🎮 Crash Game API Documentation</h1>
+    <p>Base URL: <code>http://your-api-domain/api</code></p>
+
+    <div class="section">
+        <h2>Authentication</h2>
+        <p>All authenticated endpoints require a Bearer token in the Authorization header:</p>
+        <div class="code">
+            Authorization: Bearer &lt;token&gt;
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Game Endpoints</h2>
+
+        <div class="endpoint">
+            <div class="endpoint-header">
+                <span class="method get">GET</span>
+                <span>/game/current</span>
+                <span class="tag">Game</span>
+            </div>
+            <div class="endpoint-content">
+                <p>Get current game state</p>
+                <h4>Response 200</h4>
+                <div class="code">
+{
+    "gameId": "123456",
+    "status": "waiting|in_progress|crashed",
+    "startTime": "2024-03-21T15:04:05Z",
+    "crashPoint": 2.5,
+    "players": {
+        "userId": {
+            "betAmount": 100,
+            "cashedOut": false,
+            "cashoutAt": 0
+        }
+    },
+    "elapsed": 5.23
+}
+                </div>
+            </div>
+        </div>
+
+        <div class="endpoint">
+            <div class="endpoint-header">
+                <span class="method post">POST</span>
+                <span>/bet</span>
+                <span class="tag">Game</span>
+            </div>
+            <div class="endpoint-content">
+                <p>Place a bet for the current game</p>
+                <h4>Request Body</h4>
+                <div class="code">
+{
+    "amount": 100
+}
+                </div>
+                <h4>Response 200</h4>
+                <div class="code">
+{
+    "success": true
+}
+                </div>
+            </div>
+        </div>
+
+        <div class="endpoint">
+            <div class="endpoint-header">
+                <span class="method post">POST</span>
+                <span>/cashout</span>
+                <span class="tag">Game</span>
+            </div>
+            <div class="endpoint-content">
+                <p>Cashout from current game</p>
+                <h4>Response 200</h4>
+                <div class="code">
+{
+    "multiplier": 2.5,
+    "winAmount": 250
+}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>User Endpoints</h2>
+
+        <div class="endpoint">
+            <div class="endpoint-header">
+                <span class="method post">POST</span>
+                <span>/register</span>
+                <span class="tag">Auth</span>
+            </div>
+            <div class="endpoint-content">
+                <p>Register new user</p>
+                <h4>Request Body</h4>
+                <div class="code">
+{
+    "username": "user123",
+    "password": "securepass",
+    "email": "user@example.com"
+}
+                </div>
+                <h4>Response 200</h4>
+                <div class="code">
+{
+    "userId": "user123",
+    "token": "jwt_token"
+}
+                </div>
+            </div>
+        </div>
+
+        <div class="endpoint">
+            <div class="endpoint-header">
+                <span class="method post">POST</span>
+                <span>/login</span>
+                <span class="tag">Auth</span>
+            </div>
+            <div class="endpoint-content">
+                <p>User login</p>
+                <h4>Request Body</h4>
+                <div class="code">
+{
+    "username": "user123",
+    "password": "securepass"
+}
+                </div>
+                <h4>Response 200</h4>
+                <div class="code">
+{
+    "token": "jwt_token",
+    "user": {
+        "id": "user123",
+        "username": "user123",
+        "balance": 1000
+    }
+}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Payment Endpoints</h2>
+
+        <div class="endpoint">
+            <div class="endpoint-header">
+                <span class="method post">POST</span>
+                <span>/withdraw</span>
+                <span class="tag">Payment</span>
+            </div>
+            <div class="endpoint-content">
+                <p>Request withdrawal</p>
+                <h4>Request Body</h4>
+                <div class="code">
+{
+    "amount": 100,
+    "paymentMethodId": 1
+}
+                </div>
+                <h4>Response 200</h4>
+                <div class="code">
+{
+    "message": "withdrawal request created"
+}
+                </div>
+            </div>
+        </div>
+
+        <div class="endpoint">
+            <div class="endpoint-header">
+                <span class="method post">POST</span>
+                <span>/deposit</span>
+                <span class="tag">Payment</span>
+            </div>
+            <div class="endpoint-content">
+                <p>Request deposit</p>
+                <h4>Request Body</h4>
+                <div class="code">
+{
+    "amount": 100,
+    "paymentMethodId": 1
+}
+                </div>
+                <h4>Response 200</h4>
+                <div class="code">
+{
+    "message": "deposit request created",
+    "address": "deposit_address"
+}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="section">
+        <h2>Admin Endpoints</h2>
+
+        <div class="endpoint">
+            <div class="endpoint-header">
+                <span class="method get">GET</span>
+                <span>/admin/dashboard/stats</span>
+                <span class="tag">Admin</span>
+            </div>
+            <div class="endpoint-content">
+                <p>Get dashboard statistics</p>
+                <h4>Response 200</h4>
+                <div class="code">
+{
+    "totalUsers": 1000,
+    "activeUsers24h": 250,
+    "totalBets24h": 5000,
+    "totalVolume24h": 50000,
+    "houseProfit24h": 2500,
+    "pendingWithdraws": 10,
+    "totalDeposits24h": 25000,
+    "averageMultiplier": 1.8,
+    "onlineUsers": 150
+}
+                </div>
+            </div>
+        </div>
+
+        <div class="endpoint">
+            <div class="endpoint-header">
+                <span class="method get">GET</span>
+                <span>/admin/withdrawals/pending</span>
+                <span class="tag">Admin</span>
+            </div>
+            <div class="endpoint-content">
+                <p>Get pending withdrawals</p>
+                <h4>Response 200</h4>
+                <div class="code">
+{
+    "withdrawals": [
+        {
+            "id": 1,
+            "userId": "user123",
+            "amount": 100,
+            "status": "pending",
+            "createdAt": "2024-03-21T15:04:05Z",
+            "paymentMethod": {
+                "type": "crypto",
+                "address": "0x..."
+            }
+        }
+    ]
+}
+                </div>
+            </div>
+        </div>
+
+        <div class="endpoint">
+            <div class="endpoint-header">
+                <span class="method post">POST</span>
+                <span>/admin/withdrawals/:id/approve</span>
+                <span class="tag">Admin</span>
+            </div>
+            <div class="endpoint-content">
+                <p>Approve or reject withdrawal</p>
+                <h4>Request Body</h4>
+                <div class="code">
+{
+    "action": "approve|reject",
+    "rejectionReason": "Optional reason for rejection"
+}
+                </div>
+                <h4>Response 200</h4>
+                <div class="code">
+{
+    "message": "withdrawal approved/rejected successfully"
+}
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Add click handlers for endpoint headers
+        document.querySelectorAll('.endpoint-header').forEach(header => {
+            header.addEventListener('click', () => {
+                const content = header.nextElementSibling;
+                content.style.display = content.style.display === 'none' ? 'block' : 'none';
+            });
+        });
+    </script>
+</body>
+</html>
