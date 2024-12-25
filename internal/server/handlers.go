@@ -4,6 +4,7 @@ import (
 	"crash-game/internal/game"
 	"crash-game/internal/models"
 
+	"fmt"
 	"log"
 	"strings"
 	"time"
@@ -57,7 +58,7 @@ func (s *GameServer) UpdateBalance(c *gin.Context) {
 func (s *GameServer) PlaceBet(c *gin.Context) {
 	var req struct {
 		Amount      float64  `json:"amount" binding:"required,gt=0"`
-		AutoCashout *float64 `json:"autoCashout" binding:"omitempty,gt=1"`
+		AutoCashout *float64 `json:"auto_cashout" binding:"omitempty,gt=1"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -115,11 +116,36 @@ func (s *GameServer) PlaceBet(c *gin.Context) {
 	}
 
 	// Record the bet
+	log.Printf("📝 DEBUG: Recording bet - User: %s, Amount: %.2f, AutoCashout: %v",
+		userID, req.Amount, req.AutoCashout)
+
+	autoCashoutValue := "<nil>"
+	if req.AutoCashout != nil {
+		autoCashoutValue = fmt.Sprintf("%.2f", *req.AutoCashout)
+	}
+	log.Printf("🎯 DEBUG: [BET] Setting up bet - User: %s, Amount: %.2f, AutoCashout: %s",
+		userID, req.Amount, autoCashoutValue)
+
 	s.currentGame.Players[userID] = &Player{
+		UserID:      userID,
 		BetAmount:   req.Amount,
 		CashedOut:   false,
 		WinAmount:   0,
 		AutoCashout: req.AutoCashout,
+	}
+
+	// Verify the bet was recorded correctly
+	if player := s.currentGame.Players[userID]; player != nil {
+		actualAutoCashout := "<nil>"
+		if player.AutoCashout != nil {
+			actualAutoCashout = fmt.Sprintf("%.2f", *player.AutoCashout)
+		}
+		log.Printf("✅ DEBUG: [BET] Bet recorded - User: %s, AutoCashout: %s",
+			userID, actualAutoCashout)
+	}
+
+	if req.AutoCashout != nil {
+		log.Printf("🎯 DEBUG: Auto-cashout set to %.2fx for user %s", *req.AutoCashout, userID)
 	}
 
 	c.JSON(200, gin.H{
@@ -303,9 +329,10 @@ func (s *GameServer) GetCurrentGame(c *gin.Context) {
 	}
 
 	c.JSON(200, gin.H{
-		"gameId": s.currentGame.GameID,
-		"status": s.currentGame.Status,
-		"hash":   s.currentGame.Hash,
+		"gameId":  s.currentGame.GameID,
+		"status":  s.currentGame.Status,
+		"hash":    s.currentGame.Hash,
+		"players": s.currentGame.Players,
 	})
 }
 
@@ -372,4 +399,133 @@ func (s *GameServer) VerifyGameFairness(c *gin.Context) {
 		"crashPoint": crashPoint,
 		"seed":       seed,
 	})
+}
+
+func (s *GameServer) GetPlayerGameHistory(c *gin.Context) {
+	userID := c.GetString("userId")
+	if userID == "" {
+		log.Printf("❌ Unauthorized access attempt to player history")
+		c.JSON(401, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	log.Printf("📊 Getting bet history for user: %s", userID)
+
+	rows, err := s.db.GetPlayerBetHistory(userID)
+	if err != nil {
+		log.Printf("❌ Database query failed: %v", err)
+		c.JSON(500, gin.H{"error": "failed to get bet history"})
+		return
+	}
+	defer rows.Close()
+
+	var history []gin.H
+	for rows.Next() {
+		var h struct {
+			GameID            string     `json:"game_id"`
+			BetAmount         float64    `json:"bet_amount"`
+			WinAmount         *float64   `json:"win_amount"`
+			CashedOut         bool       `json:"cashed_out"`
+			CashoutMultiplier *float64   `json:"cashout_multiplier"`
+			AutoCashout       *float64   `json:"auto_cashout"`
+			CreatedAt         time.Time  `json:"created_at"`
+			CashoutAt         *time.Time `json:"cashout_at"`
+			CrashPoint        float64    `json:"crash_point"`
+			Hash              string     `json:"hash"`
+			Status            string     `json:"status"`
+		}
+
+		err := rows.Scan(
+			&h.GameID,
+			&h.BetAmount,
+			&h.WinAmount,
+			&h.CashedOut,
+			&h.CashoutMultiplier,
+			&h.AutoCashout,
+			&h.CreatedAt,
+			&h.CashoutAt,
+			&h.CrashPoint,
+			&h.Hash,
+			&h.Status,
+		)
+		if err != nil {
+			log.Printf("❌ Row scan failed: %v", err)
+			continue
+		}
+
+		history = append(history, gin.H{
+			"game_id":            h.GameID,
+			"bet_amount":         h.BetAmount,
+			"win_amount":         h.WinAmount,
+			"cashed_out":         h.CashedOut,
+			"cashout_multiplier": h.CashoutMultiplier,
+			"auto_cashout":       h.AutoCashout,
+			"created_at":         h.CreatedAt,
+			"cashout_at":         h.CashoutAt,
+			"crash_point":        h.CrashPoint,
+			"hash":               h.Hash,
+			"status":             h.Status,
+		})
+	}
+
+	log.Printf("✅ Found %d games in history for user %s", len(history), userID)
+	c.JSON(200, history)
+}
+
+func (s *GameServer) endGame() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.currentGame == nil || s.currentGame.Status != "in_progress" {
+		status := "nil"
+		if s.currentGame != nil {
+			status = s.currentGame.Status
+		}
+		log.Printf("❌ Cannot end game: game=%v, status=%v",
+			s.currentGame != nil, status)
+		return
+	}
+
+	log.Printf("🎮 Ending game %s at crash point %.2f",
+		s.currentGame.GameID, s.currentGame.CrashPoint)
+
+	s.currentGame.Status = "crashed"
+	s.currentGame.EndTime = time.Now()
+
+	// Create game history record with initialized Players slice
+	history := &models.GameHistory{
+		GameID:     s.currentGame.GameID,
+		CrashPoint: s.currentGame.CrashPoint,
+		Hash:       s.currentGame.Hash,
+		StartTime:  s.currentGame.StartTime,
+		EndTime:    s.currentGame.EndTime,
+		Status:     "crashed",                                                   // Explicitly set status
+		Players:    make([]models.PlayerHistory, 0, len(s.currentGame.Players)), // Pre-allocate slice
+	}
+
+	// Convert current players to player history
+	for userID, player := range s.currentGame.Players {
+		log.Printf("👤 Processing player %s: Bet=%.2f, Win=%.2f, CashedOut=%v",
+			userID, player.BetAmount, player.WinAmount, player.CashedOut)
+
+		history.Players = append(history.Players, models.PlayerHistory{
+			UserID:      userID,
+			BetAmount:   player.BetAmount,
+			WinAmount:   player.WinAmount,
+			CashedOut:   player.CashedOut,
+			CashoutAt:   player.CashoutAt,
+			AutoCashout: player.AutoCashout,
+		})
+	}
+
+	// Save game history to database
+	if err := s.db.SaveGameHistory(history); err != nil {
+		log.Printf("❌ Failed to save game history: %v", err)
+	} else {
+		log.Printf("✅ Game history saved - ID: %s, Players: %d",
+			history.GameID, len(history.Players))
+	}
+
+	// Start new game after delay
+	time.AfterFunc(5*time.Second, s.startNewGame)
 }

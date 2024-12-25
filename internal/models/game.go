@@ -8,15 +8,18 @@ import (
 )
 
 type GameHistory struct {
-	GameID            string          `json:"gameId"`
-	CrashPoint        float64         `json:"crashPoint"`
-	StartTime         time.Time       `json:"startTime"`
-	EndTime           time.Time       `json:"endTime"`
-	BetAmount         *float64        `json:"betAmount,omitempty"`
-	CashoutMultiplier *float64        `json:"cashoutMultiplier,omitempty"`
-	WinAmount         *float64        `json:"winAmount,omitempty"`
-	Hash              string          `json:"hash"`
-	Players           []PlayerHistory `json:"players"`
+	GameID      string          `json:"game_id"`
+	CrashPoint  float64         `json:"crash_point"`
+	Hash        string          `json:"hash"`
+	StartTime   time.Time       `json:"start_time"`
+	EndTime     time.Time       `json:"end_time"`
+	BetAmount   float64         `json:"bet_amount"`
+	WinAmount   float64         `json:"win_amount"`
+	CashedOut   bool            `json:"cashed_out"`
+	CashoutAt   float64         `json:"cashout_at"`
+	AutoCashout float64         `json:"auto_cashout"`
+	Players     []PlayerHistory `json:"players,omitempty"`
+	Status      string          `json:"status"`
 }
 
 type GameVerification struct {
@@ -34,12 +37,12 @@ type Player struct {
 }
 
 type PlayerHistory struct {
-	UserID     string     `json:"userId"`
-	BetAmount  float64    `json:"betAmount"`
-	CashedOut  bool       `json:"cashedOut"`
-	CashoutAt  *time.Time `json:"cashoutAt,omitempty"`
-	WinAmount  float64    `json:"winAmount"`
-	Multiplier float64    `json:"multiplier,omitempty"`
+	UserID      string     `json:"user_id"`
+	BetAmount   float64    `json:"bet_amount"`
+	WinAmount   float64    `json:"win_amount"`
+	CashedOut   bool       `json:"cashed_out"`
+	CashoutAt   *time.Time `json:"cashout_at"`
+	AutoCashout *float64   `json:"auto_cashout"`
 }
 
 func CalculateCrashPoint(seed string) float64 {

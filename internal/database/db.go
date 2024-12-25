@@ -177,33 +177,60 @@ func (d *Database) MarkNotificationRead(notificationID string, adminID string) e
 }
 
 func (d *Database) SaveGameHistory(history *models.GameHistory) error {
+	log.Printf("📝 Starting SaveGameHistory for game %s with %d players",
+		history.GameID, len(history.Players))
+
 	tx, err := d.db.Begin()
 	if err != nil {
+		log.Printf("❌ Failed to begin transaction: %v", err)
 		return err
 	}
 	defer tx.Rollback()
 
-	// Insert game record
-	_, err = tx.Exec(`
-		INSERT INTO games (game_id, crash_point, start_time, end_time, hash)
-		VALUES ($1, $2, $3, $4, $5)
-	`, history.GameID, history.CrashPoint, history.StartTime, history.EndTime, history.Hash)
+	// Insert game first
+	result, err := tx.Exec(`
+		INSERT INTO games (game_id, crash_point, start_time, end_time, hash, status)
+		VALUES ($1::uuid, $2, $3, $4, $5, $6)
+	`, history.GameID, history.CrashPoint, history.StartTime, history.EndTime, history.Hash, history.Status)
+
 	if err != nil {
+		log.Printf("❌ Failed to insert game: %v", err)
 		return err
 	}
 
-	// Insert player records
+	rowsAffected, _ := result.RowsAffected()
+	log.Printf("✅ Game inserted: ID=%s, Status=%s, Rows=%d",
+		history.GameID, history.Status, rowsAffected)
+
+	// Insert bets
 	for _, player := range history.Players {
-		_, err = tx.Exec(`
-			INSERT INTO bets (game_id, user_id, amount, cashed_out, cashout_at, win_amount)
-			VALUES ($1, $2, $3, $4, $5, $6)
-		`, history.GameID, player.UserID, player.BetAmount, player.CashedOut, player.CashoutAt, player.WinAmount)
+		log.Printf("👤 Inserting bet - Game: %s, User: %s, Amount: %.2f",
+			history.GameID, player.UserID, player.BetAmount)
+
+		result, err = tx.Exec(`
+			INSERT INTO bets (game_id, user_id, amount, win_amount, cashed_out, cashout_at, auto_cashout)
+			VALUES ($1::uuid, $2::uuid, $3, $4, $5, $6, $7)
+		`, history.GameID, player.UserID, player.BetAmount, player.WinAmount,
+			player.CashedOut, player.CashoutAt, player.AutoCashout)
+
 		if err != nil {
+			log.Printf("❌ Failed to insert bet for user %s: %v", player.UserID, err)
 			return err
 		}
+
+		rowsAffected, _ = result.RowsAffected()
+		log.Printf("✅ Bet inserted: Game=%s, User=%s, Amount=%.2f, Win=%.2f, Rows=%d",
+			history.GameID, player.UserID, player.BetAmount, player.WinAmount, rowsAffected)
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		log.Printf("❌ Failed to commit transaction: %v", err)
+		return err
+	}
+
+	log.Printf("✅ Successfully saved game history for %s with %d players",
+		history.GameID, len(history.Players))
+	return nil
 }
 
 func (d *Database) GetGameByID(gameID string) (*models.GameHistory, error) {
@@ -228,4 +255,94 @@ func (d *Database) GetGameByID(gameID string) (*models.GameHistory, error) {
 	log.Printf("DB: Found game - ID: %s, Hash: %s, CrashPoint: %f",
 		game.GameID, game.Hash, game.CrashPoint)
 	return &game, nil
+}
+
+func (d *Database) Close() error {
+	return d.db.Close()
+}
+
+func (d *Database) GetPlayerGameHistory(userID string) ([]models.GameHistory, error) {
+	log.Printf("🔍 Getting game history for user: %s", userID)
+
+	query := `
+		SELECT g.game_id, g.crash_point, g.hash, g.start_time, g.end_time, g.status,
+			   b.amount as bet_amount, b.win_amount, b.cashed_out, 
+			   b.cashout_at, 
+			   b.auto_cashout
+		FROM games g
+		JOIN bets b ON g.game_id = b.game_id
+		WHERE b.user_id = $1
+		ORDER BY g.start_time DESC`
+
+	rows, err := d.db.Query(query, userID)
+	if err != nil {
+		log.Printf("❌ Failed to query game history: %v", err)
+		return nil, err
+	}
+	defer rows.Close()
+
+	var history []models.GameHistory
+	for rows.Next() {
+		var game models.GameHistory
+		var cashoutAt sql.NullTime
+		var autoCashout sql.NullFloat64
+
+		err := rows.Scan(
+			&game.GameID,
+			&game.CrashPoint,
+			&game.Hash,
+			&game.StartTime,
+			&game.EndTime,
+			&game.Status,
+			&game.BetAmount,
+			&game.WinAmount,
+			&game.CashedOut,
+			&cashoutAt,
+			&autoCashout,
+		)
+		if err != nil {
+			log.Printf("❌ Failed to scan row: %v", err)
+			return nil, err
+		}
+
+		if cashoutAt.Valid {
+			game.CashoutAt = float64(cashoutAt.Time.Unix())
+		}
+		if autoCashout.Valid {
+			game.AutoCashout = autoCashout.Float64
+		}
+
+		history = append(history, game)
+	}
+
+	log.Printf("✅ Found %d games in history for user %s", len(history), userID)
+	return history, nil
+}
+
+func (d *Database) GetPlayerBetHistory(userID string) (*sql.Rows, error) {
+	query := `
+		SELECT 
+			b.game_id,
+			b.amount as bet_amount,
+			b.win_amount,
+			b.cashed_out,
+			b.cashout_multiplier,
+			b.auto_cashout,
+			b.created_at,
+			b.cashout_at,
+			g.crash_point,
+			g.hash,
+			g.status
+		FROM bets b
+		JOIN games g ON b.game_id = g.game_id
+		WHERE b.user_id = $1
+		ORDER BY b.created_at DESC
+		LIMIT 50
+	`
+	return d.db.Query(query, userID)
+}
+
+// GetDB returns the underlying database connection
+func (d *Database) GetDB() *sql.DB {
+	return d.db
 }
